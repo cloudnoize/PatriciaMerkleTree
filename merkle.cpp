@@ -8,12 +8,13 @@
 #include <cstring>
 #include <queue>
 #include <iomanip>
-
-
-
-std::string getRootKey(){
-	return std::string("root");
-}
+ /*
+ TODOs- 
+  - Key should be binary.
+  - Basic optimizations.
+  - Support Deletions.
+  - Merkle Proofs
+ */
 
 
 std::string basicHash(const std::string &input) {
@@ -68,6 +69,15 @@ struct NibblePath{
 
 std::map<char,uint8_t> NibblePath::HextoNib = {{'0',0},{'1',1},{'2',2},{'3',3},{'4',4},{'5',5},{'6',6},{'7',7},{'8',8},{'9',9},{'A',10},{'B',11},{'C',12},{'D',13},{'E',14},{'F',15}};
 std::map<char,uint8_t> NibblePath::NibToHex = {{0,'0'},{1,'1'},{2,'2'},{3,'3'},{4,'4'},{5,'5'},{6,'6'},{7,'7'},{8,'8'},{9,'9'},{10,'A'},{11,'B'},{12,'C'},{13,'D'},{14,'E'},{15,'F'}};
+
+const std::string&  getRootKey(bool raw = false){
+    const static std::string rootKey = ".";
+    static std::string hexRootKey;
+    if(hexRootKey.empty()){
+        hexRootKey = NibblePath::keyToNibbleHex(rootKey);
+    }
+	return raw ? rootKey : hexRootKey;
+}
 
 struct Node{
 	std::string valueHash;
@@ -213,7 +223,7 @@ void insertKV(std::string key ,std::string val){
     Node* node = directGetNode(currentNodeKey);
     std::string hexNibbleKey = NibblePath::keyToNibbleHex(key);
     std::cout << "Inserting key " << key << " hex nibble key " << hexNibbleKey << "\n";
-	for(int i = 0 ; i < hexNibbleKey.size();++i){
+	for(int i = 2 ; i < hexNibbleKey.size();++i){
         auto hexNibble = hexNibbleKey[i];
         std::cout << "Searching node " << *node << "\n";
         auto nibble = NibblePath::HexNibbleToNibble(hexNibble);
@@ -277,13 +287,9 @@ void insertKV(std::string key ,std::string val){
 }
 
 std::optional<Node*> findParentNode(std::string& key){
-    if(key.empty()){
-        std::cout << "Empty key , duducing root is required\n";
-        key = getRootKey();
-        return db[key];
-    }
     while(!key.empty()){
         key.pop_back();
+        std::cout << "Looking for parent of key  " << key << "\n"; 
         if(nodesToUpdate.count(key) == 1){
             std::cout << "Parent node is in nodesToUpdate with key " << key << "\n";
             return nodesToUpdate[key];
@@ -297,9 +303,6 @@ std::optional<Node*> findParentNode(std::string& key){
 }
 
 void updateNodeMerkleValue(std::string key,Node* node){
-    if(key == getRootKey()){
-        key = "";
-    }
     //compose whole key
     key += node->extension;
     // make space for a char to use in child keys
@@ -336,8 +339,8 @@ void updateMerkleRoot(){
             std::cout << "Arrived to root\n";
             continue;
         }
-        nodePair.first.pop_back();
         // changes the key to the returned node's key
+        std::cout << "Node Key is " << nodePair.first << "\n";
         auto optParentNode = findParentNode(nodePair.first);
         assert(optParentNode.has_value());
         bfs.push({nodePair.first,*optParentNode});
@@ -371,7 +374,7 @@ Node* getNode(const std::string& key){
     auto hexNibbleKey = NibblePath::keyToNibbleHex(key);
     std::cout << "Searching for " << hexNibbleKey << "\n";
     auto currentKey =  getRootKey();
-    bool isRoot = true;
+    // bool isRoot = true;
     
     for(uint32_t loc = 0; loc < hexNibbleKey.size();){
         if(db.count(currentKey) == 0){
@@ -379,11 +382,11 @@ Node* getNode(const std::string& key){
             break;
         }
         auto node = db[currentKey];
-        if(isRoot){
-            currentKey = "";
-            //E.L make transparent
-            isRoot = false;
-        }
+        // if(isRoot){
+        //     currentKey = "";
+        //     //E.L make transparent
+        //     isRoot = false;
+        // }
         // first check if node represents the key
         auto wholeKey = currentKey + node->extension;
         std::cout << "Current node represents the key " << wholeKey << "\n";
@@ -414,68 +417,10 @@ Node* getNode(const std::string& key){
     return nullptr;
 }
 
-// Node* getNode(const std::string& key){
-//     auto hexNibbleKey = NibblePath::keyToNibbleHex(key);
-//     std::cout << "Searching for " << hexNibbleKey << "\n";
-//     auto currentKey =  getRootKey();
-//     for(int loc = 0, nibbleCount = 1 ; loc < hexNibbleKey.size() ; ++loc,++nibbleCount){
-//         std::cout << "currentKey " << currentKey << " loc is " << loc << " nibbleCount " << nibbleCount << "\n";
-//         auto node = db[currentKey];
-//         std::cout << "Searching node " << *node << "\n";
-//         auto fullKEy = currentKey + node->extension;
-//         if(fullKEy == hexNibbleKey){
-//             if(node->isValue) return node;
-//             std::cout << "node full key " << fullKEy << "matches key, but do not represent a value ";
-//             return nullptr;
-//         }
-//         auto hexNibble = hexNibbleKey[loc];
-//         auto nibble = NibblePath::HexNibbleToNibble(hexNibble);
-//         std::cout << "Handling nibble value of " << (int)nibble << "\n";
-//         if(!node->branches[nibble]){
-//             std::cout << "Node for key " << key << " does not exist\n";
-//             return nullptr;
-//         }
-//         auto [nextNodeKey,_] = getKeyAndExtension(nibbleCount,hexNibbleKey);
-//         std::cout << "Next key is " << nextNodeKey << "\n";
-//         if(db.count(nextNodeKey) == 0){
-//             std::cout << "ERROR: Failed to get node for key " << key << "\n";
-//             return nullptr;
-//         }
-//         node = db[nextNodeKey];
-//         std::cout << "get node " << *node << " from db\n";
-//         //end of key, check current node
-//         std::cout << "Checking if end of key nibbleCount " << nibbleCount << " == hexNibbleKey.size() " << hexNibbleKey.size() << "\n";
-//         if(nibbleCount == hexNibbleKey.size()){
-//             return node->isValue  ? node : nullptr;
-//         }
-//         // this node represents a key with bigger length than given key, hence do not match
-//         std::cout << "Checking if with extension size " << node->extension.size() + nibbleCount  << " is bigger than hexNibbleKey.size() " << hexNibbleKey.size() << "\n";
-//         if(node->extension.size() + nibbleCount > hexNibbleKey.size() ){
-//             return nullptr;
-//         }
-//         //chek if extension is substring of rest of key
-//         std::cout << "hexNibbleKey " << hexNibbleKey << " nibbleCount " << nibbleCount << " node->extension.size() " << node->extension.size() << "  node->extension " <<  node->extension << "\n";
-//         std::cout << "Checking if extension is substring of rest of key, rest of key " << hexNibbleKey.substr(nibbleCount,node->extension.size())  << " node->extension " << node->extension << "\n";
-//         if(hexNibbleKey.compare(nibbleCount,node->extension.size(),node->extension) != 0){
-//             return nullptr;
-//         }
-//         //extension is a substring 
-//         std::cout << "extension is a substring comparing sizes,  hexNibbleKey.size() " <<  hexNibbleKey.size()  << " i+node->extension.size() " << nibbleCount + node->extension.size() << "\n";
-//         if(nibbleCount+node->extension.size() == hexNibbleKey.size()){
-//             return node->isValue  ? node : nullptr;
-//         }
-//         // advance i to end of extension
-//         loc += node->extension.size() + 1;
-//         nibbleCount  = loc + 1;
-//         auto [crn,__] = getKeyAndExtension(nibbleCount,hexNibbleKey); 
-//         currentKey = crn;
-//     }
-//     std::cout << "End of key, didn't find\n";
-//     return nullptr;
-// }
 
 int main() {
     std::string choice;
+    bool rawKey = true;
     db[getRootKey()] = new Node();
 
     while (true) {
@@ -487,6 +432,7 @@ int main() {
             std::string key, value;
             std::cout << "Enter key: ";
             std::cin >> key;
+            key = getRootKey(rawKey) + key;
             std::cout << "Enter value: ";
             std::cin >> value;
             block[key] = value;
@@ -495,7 +441,7 @@ int main() {
             std::string key;
             std::cout << "Enter key: ";
             std::cin >> key;
-            auto node = getNode(key);
+            auto node = getNode(getRootKey(rawKey) + key);
             if(node == nullptr){
                 std::cout << "Key wasn'ft found\n";
                 continue;
