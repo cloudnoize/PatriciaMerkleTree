@@ -14,6 +14,9 @@
   - Basic optimizations.
   - Support Deletions.
   - Merkle Proofs
+  - versioned imp - the Node array bool branches[16] = {false}; will be uint64 array that will hold the version of the child node.
+    The version will be a postfix/prefix of the key,
+
  */
 
 
@@ -106,12 +109,13 @@ std::ostream& operator<<(std::ostream& os, const Node& node) {
 
 //Currnetly we won't do a versioned tree
 uint64_t rootVersion = 0;
+// Represents the nodes that have changed and need to be written
 std::map<std::string,Node*,std::less<>> nodesToUpdate;
+//Represents the on disk data
+std::map<std::string,Node*,std::less<>> db;
 // Thinking of updateing it in a bfs manner i.e. having a queue of updated leaves at the end of the update,
 // then poping nodes, each node updates its Merkle Value  and pushing to the queue its parent. 
-std::map<std::string,Node*,std::less<>> db;
-std::set<std::string,std::less<>> staleNode;
-std::queue<std::pair<std::string,Node*>> bfs;
+std::queue<std::pair<std::string_view,Node*>> bfs;
 
 Node* directGetNode(const std::string& key){
     if(nodesToUpdate.count(key) == 1){
@@ -125,31 +129,34 @@ std::pair<std::string,std::string> getKeyAndExtension(uint64_t divider,const std
     return {std::string(hexNibKey.c_str(),divider),std::string(hexNibKey.c_str() + divider, hexNibKey.size() - divider)};
 }
 
-// std::string getExtension(uint64_t pathPos,const std::string& hexNibKey){
-//     auto keySize = hexNibKey.size();
-//     if(pathPos > keySize){
-//         std::cout << "pathPos " << pathPos << " is bigger than the key " << hexNibKey << "\n";
-//         exit;
-//     }
-//     if(pathPos == keySize) return "";
-//     return std::string(hexNibKey.c_str() + pathPos, keySize - pathPos);
-// }
+std::pair<std::string_view,std::string_view> getKeyAndExtensionByView(uint64_t divider,const std::string& hexNibKey){
+    return {std::string_view(hexNibKey.c_str(),divider),std::string_view(hexNibKey.c_str() + divider, hexNibKey.size() - divider)};
+}
 
-
-
-std::string AddNewNodeToUpdate(uint64_t pathPos,const std::string& hexNibKey,std::optional<std::reference_wrapper<const std::string>> val){
+void AddNewNodeToUpdate(uint64_t pathPos,const std::string& hexNibKey,std::optional<std::reference_wrapper<const std::string>> val,std::string* retKey = nullptr){
     auto node = new Node();
     auto[key,extension] = getKeyAndExtension(pathPos,hexNibKey);
-    node->extension = extension;
+    node->extension = std::move(extension);
     if(val){
         node->isValue = true;
         node->valueHash = basicHash(*val);
-        std::cout << "Adding value node to bfs, bfs size " << bfs.size() << "\n"; 
-        bfs.push({key,node});
     }
-    nodesToUpdate[key] = node;
     std::cout << "Adding node " << *node << "\nwith key " << key << "\n";
-    return key;
+    if(retKey!=nullptr){
+        *retKey = key;
+    }
+    auto [it, success] = nodesToUpdate.insert({std::move(key), node});
+    
+    if (success) {
+        std::cout << "Adding node " << *node << "\nwith key " << it->first << "\n";
+        if(retKey != nullptr){
+            *retKey = it->first; // Set the return key to the key from the map
+        }
+        if(val){
+            std::cout << "Adding value node to bfs, bfs size " << bfs.size() << "\n"; 
+            bfs.push({it->first, node}); // Now, the string_view points to the string within nodesToUpdate
+        }
+    }
 }
 //cases:
 // if extension are not equal, shrink node to the common extension and add to it two nodes of the diverge
@@ -158,7 +165,7 @@ std::string AddNewNodeToUpdate(uint64_t pathPos,const std::string& hexNibKey,std
 // - if its the updated key, it should update the value of the node
 // - it its the node then we should skip the extension in the updatd key and continue
 void splitCommonExtension(uint64_t pathPos,const std::string& hexNibKey,const std::string& val,Node* node){
-    auto [currentKey,keyExtension] = getKeyAndExtension(pathPos,hexNibKey);
+    auto [currentKey,keyExtension] = getKeyAndExtensionByView(pathPos,hexNibKey);
     std::cout << "Splitting common extenstion, node extension " << node->extension << " key extension " << keyExtension << "\n";
     //equal i.e. update
     // E.L handled bdfore
@@ -166,7 +173,7 @@ void splitCommonExtension(uint64_t pathPos,const std::string& hexNibKey,const st
         node->isValue =true;
         node->valueHash = basicHash(val);
         std::cout << "Extension equals, update node " << *node << "\n";
-        nodesToUpdate[std::string(hexNibKey.c_str(),pathPos)] = node;
+        nodesToUpdate.emplace(std::move(currentKey),node);
         return;
     }
     uint64_t sizeOfCommonExtension = 0;
@@ -179,7 +186,8 @@ void splitCommonExtension(uint64_t pathPos,const std::string& hexNibKey,const st
         //assert(i<node->extension.size())
         // ++pathPos - to include the first nibble of the extension
         std::cout << "New key is a sub string of current on the path of\n";
-        auto newnodeKey = AddNewNodeToUpdate(pathPos,hexNibKey,val);
+        std::string newnodeKey;
+        AddNewNodeToUpdate(pathPos,hexNibKey,val,&newnodeKey);
         auto newNode = nodesToUpdate[newnodeKey];
         // truncate the added key common extension from the node extension
         auto [_,remaining] =  getKeyAndExtension(sizeOfCommonExtension,node->extension);
@@ -199,14 +207,15 @@ void splitCommonExtension(uint64_t pathPos,const std::string& hexNibKey,const st
         // and add also a the modified extension node with a new key
         //new extension node is the following path
         auto pathOfNewExtension = hexNibKey.substr(0,pathPos+sizeOfCommonExtension);
-        auto newExtNodeKey = AddNewNodeToUpdate(pathPos,pathOfNewExtension,std::nullopt); 
+        std::string newExtNodeKey;
+        AddNewNodeToUpdate(pathPos,pathOfNewExtension,std::nullopt,&newExtNodeKey); 
         auto newNode = nodesToUpdate[newExtNodeKey];
         // set true on new key and add it
         newNode->branches[NibblePath::HexNibbleToNibble(hexNibKey[pathPos + sizeOfCommonExtension])] = true;
         std::cout << "Common extension is smallaer then both, adding new extension node, with key " << newExtNodeKey << " node " << *newNode << "\n";
         AddNewNodeToUpdate(pathPos + sizeOfCommonExtension + 1,hexNibKey,val);
         //shorten node extension
-        auto wholeKeyOfPrvExtension = currentKey + node->extension;
+        auto wholeKeyOfPrvExtension = std::string(currentKey) + node->extension;
         auto [updatedKey,updatedExtension] = getKeyAndExtension(pathPos + sizeOfCommonExtension + 1,wholeKeyOfPrvExtension);
         node->extension = updatedExtension;
         nodesToUpdate[updatedKey] = node;
@@ -223,6 +232,7 @@ void insertKV(std::string key ,std::string val){
     Node* node = directGetNode(currentNodeKey);
     std::string hexNibbleKey = NibblePath::keyToNibbleHex(key);
     std::cout << "Inserting key " << key << " hex nibble key " << hexNibbleKey << "\n";
+    //Starting from 2 since the first 2 nubbles are from the root key
 	for(int i = 2 ; i < hexNibbleKey.size();++i){
         auto hexNibble = hexNibbleKey[i];
         std::cout << "Searching node " << *node << "\n";
@@ -267,7 +277,7 @@ void insertKV(std::string key ,std::string val){
         nibble = NibblePath::HexNibbleToNibble(hexNibbleKey[endOfNewKey+1]);
         if(node->branches[nibble] == false){
             std::cout << "Extension branch is false adding node\n";
-            auto addedKey = AddNewNodeToUpdate(endOfNewKey,hexNibbleKey,val);
+            AddNewNodeToUpdate(endOfNewKey,hexNibbleKey,val);
             node->branches[nibble]  = true;
             nodesToUpdate[currentNodeKey] = node;
             std::cout << "Updating current node to indicate new branch " << *node << "\n";
@@ -286,17 +296,17 @@ void insertKV(std::string key ,std::string val){
     nodesToUpdate[hexNibbleKey] = node;
 }
 
-std::optional<Node*> findParentNode(std::string& key){
+std::optional<Node*> findParentNode(std::string_view& key){
     while(!key.empty()){
-        key.pop_back();
+        key.remove_suffix(1);
         std::cout << "Looking for parent of key  " << key << "\n"; 
         if(nodesToUpdate.count(key) == 1){
             std::cout << "Parent node is in nodesToUpdate with key " << key << "\n";
-            return nodesToUpdate[key];
+            return nodesToUpdate.find(key)->second;
         }
         if(db.count(key) == 1){
             std::cout << "Parent node is in db with key " << key << "\n";
-            return db[key];
+            return db.find(key)->second;
         }
     }
     return std::nullopt;
@@ -331,10 +341,15 @@ void updateNodeMerkleValue(std::string key,Node* node){
 
 void updateMerkleRoot(){
     while(!bfs.empty()){
-        std::pair<std::string,Node*> nodePair = bfs.back();
+        std::pair<std::string_view,Node*> nodePair = bfs.front();
         bfs.pop();
-        updateNodeMerkleValue(nodePair.first,nodePair.second);
-        nodesToUpdate[nodePair.first] = nodePair.second;
+        updateNodeMerkleValue(std::string(nodePair.first),nodePair.second);
+        // using find to enjoy the string_View lookup, furthermore item must exist
+        if(nodesToUpdate.count(nodePair.first) == 1){
+            nodesToUpdate.find(nodePair.first)->second = nodePair.second;
+        }else{
+            nodesToUpdate[std::string(nodePair.first)] = nodePair.second;
+        }
         if(nodePair.first == getRootKey()){
             std::cout << "Arrived to root\n";
             continue;
